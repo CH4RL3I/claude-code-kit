@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+"""PreToolUse guard: hide the holdouts directory (default ~/.holdouts) from every subagent
+except holdout-validator. The main session is not restricted.
+A speed bump for honest agents (matches the literal directory name and the `holdout` CLI),
+not a sandbox. Never crashes; any error -> exit 0 without output.
+
+Config: env HOLDOUTS_DIR is also matched when set.
+"""
+import json, os, re, sys
+
+CLI = re.compile(r"(^|[\s;&|(`/])holdout\s+(ls|path|add)\b")
+VALIDATOR = "holdout-validator"
+
+
+def main():
+    try:
+        d = json.load(sys.stdin)
+        if not isinstance(d, dict) or not d.get("agent_id"):
+            return
+        atype = str(d.get("agent_type") or "")
+        if atype == VALIDATOR or atype.endswith(":" + VALIDATOR):  # plugin agents are namespaced
+            return
+        needles = [".holdouts"]
+        if os.environ.get("HOLDOUTS_DIR"):
+            needles.append(os.environ["HOLDOUTS_DIR"])
+        blob = json.dumps(d.get("tool_input", {}), ensure_ascii=False)
+        ti = d.get("tool_input")
+        cmd = str(ti.get("command", "")) if isinstance(ti, dict) else ""
+        hit = any(n in blob for n in needles) or (d.get("tool_name") == "Bash" and CLI.search(cmd))
+        if not hit:
+            return
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": "Holdout scenarios are hidden from builders; only holdout-validator may read them."}}))
+    except Exception:
+        return
+
+
+main()

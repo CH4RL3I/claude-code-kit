@@ -1,0 +1,14 @@
+{
+  "name": "holdouts",
+  "description": "Hidden acceptance scenarios: a build route, a validator agent that uses the app like a user, and a guard that keeps scenarios from builders.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Emilio Gappa",
+    "email": "emiliogappa@gmail.com"
+  },
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "holdouts"
+  ]
+}

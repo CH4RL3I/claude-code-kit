@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""PreToolUse hook: prefix Agent/SendMessage hand-offs with the user's latest words, verbatim.
+
+Why: when a coordinating session briefs a subagent, the brief is the model's paraphrase.
+This hook prepends what the human actually said, so the subagent can tell who decided what.
+
+Config (environment):
+  OWNER_WORDS_NAME   how the human is called in the marker, default "the user"
+                     (marker becomes "FROM THE USER, word for word:").
+"""
+import json, os, re, sys
+
+NAME = os.environ.get("OWNER_WORDS_NAME", "").strip() or "the user"
+MARKER = f"FROM {NAME.upper()}, word for word:"
+FIELDS = {"Agent": "prompt", "SendMessage": "message"}
+CHUNK = 4 * 1024 * 1024
+MAXLEN = 2000
+PEER = object()  # a message from another session arrived after the human last spoke
+WRAPPERS = ("<",)
+SR = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
+SECRET = re.compile(
+    r"sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{10,}|xox[bp]-[A-Za-z0-9-]+"
+    r"|-----BEGIN[^\n]*(?:\n[A-Za-z0-9+/=\s]*?-----END[^\n]*)?|op://\S+|AKIA[0-9A-Z]{16}"
+    r"|(?<![A-Za-z0-9+/=_-])(?=[A-Za-z0-9+=_-]*\d)(?=[A-Za-z0-9+=_-]*[A-Z])(?=[A-Za-z0-9+=_-]*[a-z])[A-Za-z0-9+=_-]{41,}(?![A-Za-z0-9+/=_-])")
+
+
+def human_text(entry):
+    if entry.get("type") != "user" or entry.get("isMeta") or entry.get("isCompactSummary"):
+        return None
+    c = (entry.get("message") or {}).get("content")
+    if isinstance(c, list):
+        c = "\n".join(b.get("text", "") for b in c
+                      if isinstance(b, dict) and b.get("type") == "text")
+    if not isinstance(c, str):
+        return None
+    if "<cross-session-message" in c:  # also when delivered mid-turn inside a system reminder
+        return PEER
+    c = SR.sub("", c).strip()
+    if c.startswith("This session is being continued from a previous conversation"):
+        return None  # compaction summary, not the human's words
+    if not c or c.startswith(WRAPPERS):
+        return None
+    return c
+
+
+def latest_owner_text(path, stop_at_peer=False):
+    size = os.path.getsize(path)
+    with open(path, "rb") as f:
+        end = size
+        carry = b""
+        while end > 0:
+            start = max(0, end - CHUNK)
+            f.seek(start)
+            data = f.read(end - start) + carry
+            lines = data.split(b"\n")
+            if start > 0:
+                carry = lines[0]
+                lines = lines[1:]
+            else:
+                carry = b""
+            for raw in reversed(lines):
+                if not raw.strip() or b'"user"' not in raw:
+                    continue
+                try:
+                    t = human_text(json.loads(raw))
+                except Exception:
+                    continue
+                if t is PEER:
+                    if stop_at_peer:
+                        return None  # replying to a peer: the human's last words belong to another task
+                    continue
+                if t:
+                    return t
+            end = start
+    return None
+
+
+def main():
+    d = json.load(sys.stdin)
+    tool = d.get("tool_name")
+    field = FIELDS.get(tool)
+    ti = d.get("tool_input")
+    if not field or not isinstance(ti, dict):
+        return
+    text = ti.get(field)
+    if not isinstance(text, str) or not text.strip() or MARKER in text:
+        return
+    path = d.get("transcript_path")
+    if not path or not os.path.isfile(path):
+        return
+    owner = latest_owner_text(path, stop_at_peer=(tool == "SendMessage"))
+    if not owner:
+        return
+    owner = SECRET.sub("[redacted]", owner)
+    if len(owner) > MAXLEN:
+        owner = owner[:MAXLEN] + " […]"
+    new = (f'{MARKER} "{owner}"\nBrief written by Claude (the coordinating session), '
+           f'not by {NAME}. The words above are context for who decided what; '
+           f'your task is only this brief:\n\n{text}')
+    out = dict(ti)
+    out[field] = new
+    sys.stdout.write(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse", "updatedInput": out}}))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except BaseException:
+        pass
+    sys.exit(0)

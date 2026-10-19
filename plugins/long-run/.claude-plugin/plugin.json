@@ -1,0 +1,14 @@
+{
+  "name": "long-run",
+  "description": "STATE.md discipline for long unattended runs, with PreCompact/SessionStart hooks that carry it across context compaction.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Emilio Gappa",
+    "email": "emiliogappa@gmail.com"
+  },
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "long-run"
+  ]
+}

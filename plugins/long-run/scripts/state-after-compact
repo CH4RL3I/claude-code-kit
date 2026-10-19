@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""state-after-compact: SessionStart hook (matcher "compact").
+
+If STATE.md (or .claude/STATE.md) exists in the session cwd, injects its content (max 4000 chars)
+as additionalContext. Adds a note if STATE.md was not touched since the PreCompact snapshot.
+No STATE.md: no output.
+Snapshot dir: env LONG_RUN_STATE_DIR, default ~/.local/state/long-run.
+"""
+import json
+import os
+import sys
+from pathlib import Path
+
+STATE_DIR = Path(os.environ.get("LONG_RUN_STATE_DIR", Path.home() / ".local/state/long-run"))
+MAX = 4000
+HEAD = "STATE.md (source of truth after compaction):"
+
+
+def find_state(cwd):
+    for rel in ("STATE.md", ".claude/STATE.md"):
+        p = Path(cwd) / rel
+        if p.is_file():
+            return p
+    return None
+
+
+def build(payload):
+    cwd = payload.get("cwd") or ""
+    if not cwd:
+        return None
+    state = find_state(cwd)
+    if state is None:
+        return None
+    try:
+        text = state.read_text(errors="replace")
+    except Exception:
+        return None
+    if not text.strip():
+        return None
+    note = ""
+    try:
+        snap = json.loads((STATE_DIR / f"{payload.get('session_id')}.json").read_text())
+        if abs(state.stat().st_mtime - snap["mtime"]) < 1:
+            note = ("\n(Note: STATE.md was not updated before this compaction; verify it against "
+                    "the summary and refresh it.)")
+    except Exception:
+        pass
+    if len(text) > MAX:
+        text = text[:MAX] + "\n[truncated, read the file for the rest]"
+    ctx = f"{HEAD}\n{text}{note}"
+    return {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": ctx}}
+
+
+def main():
+    try:
+        out = build(json.loads(sys.stdin.read() or "{}"))
+        if out:
+            print(json.dumps(out, ensure_ascii=False))
+    except Exception:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

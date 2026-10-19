@@ -1,0 +1,14 @@
+{
+  "name": "prompt-router",
+  "description": "UserPromptSubmit hook that injects the best-matching lines of your MEMORY.md index, with optional local embeddings via Ollama.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Emilio Gappa",
+    "email": "emiliogappa@gmail.com"
+  },
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "prompt-router"
+  ]
+}

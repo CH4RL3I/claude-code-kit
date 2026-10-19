@@ -1,0 +1,14 @@
+{
+  "name": "mcp-health",
+  "description": "A `mcp-health` command that checks every MCP server Claude Code knows about, with an ignore list and optional proxy check.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Emilio Gappa",
+    "email": "emiliogappa@gmail.com"
+  },
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "mcp-health"
+  ]
+}

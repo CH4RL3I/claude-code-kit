@@ -1,0 +1,14 @@
+{
+  "name": "owner-words",
+  "description": "Prefixes Agent/SendMessage hand-offs with the user's latest words, verbatim, so subagents know who decided what.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Emilio Gappa",
+    "email": "emiliogappa@gmail.com"
+  },
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "owner-words"
+  ]
+}

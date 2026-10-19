@@ -1,0 +1,14 @@
+{
+  "name": "worktree-cleanup",
+  "description": "Removes git worktrees whose work is clean, pushed, unlocked and not in use, after a git push and at session end.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Emilio Gappa",
+    "email": "emiliogappa@gmail.com"
+  },
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "worktree-cleanup"
+  ]
+}

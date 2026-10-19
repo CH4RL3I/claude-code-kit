@@ -1,0 +1,14 @@
+{
+  "name": "references-first",
+  "description": "Skill: collect real references and agree the design direction with the user before building anything visual.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Emilio Gappa",
+    "email": "emiliogappa@gmail.com"
+  },
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "references-first"
+  ]
+}

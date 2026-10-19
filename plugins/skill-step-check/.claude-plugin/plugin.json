@@ -1,0 +1,14 @@
+{
+  "name": "skill-step-check",
+  "description": "Skill: find out which step of an inconsistent skill varies by splitting it into steps and comparing runs.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Emilio Gappa",
+    "email": "emiliogappa@gmail.com"
+  },
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "skill-step-check"
+  ]
+}

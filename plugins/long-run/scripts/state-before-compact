@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""state-before-compact: PreCompact hook for long runs.
+
+Claude Code limits (docs, PreCompact): a PreCompact hook can only block compaction
+(exit 2 / decision "block"); it CANNOT inject instructions into the model, and it discards
+`systemMessage` and `continue`. So:
+  default: never blocks. It records a snapshot of STATE.md (mtime) so that the SessionStart
+           "compact" hook (state-after-compact) can warn if STATE.md was not refreshed.
+  opt-in:  LONG_RUN_BLOCK_ONCE=1 blocks the FIRST auto/manual compaction of a session while
+           STATE.md is older than 10 minutes, with a reason telling the model to update it;
+           the retry passes. (Blocking an auto-compact that recovers from a context-limit error
+           fails the request, hence opt-in.)
+No STATE.md in cwd: no output, exit 0. Never breaks a session.
+Snapshot dir: env LONG_RUN_STATE_DIR, default ~/.local/state/long-run.
+"""
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+STATE_DIR = Path(os.environ.get("LONG_RUN_STATE_DIR", Path.home() / ".local/state/long-run"))
+STALE_S = 600
+INSTRUCTION = ("Update STATE.md now before compaction: Status (done / in progress), Tests (what ran, "
+               "result), Findings, Dead ends (what failed and why), Next step (one concrete action). "
+               "Then run /compact again.")
+
+
+def find_state(cwd):
+    for rel in ("STATE.md", ".claude/STATE.md"):
+        p = Path(cwd) / rel
+        if p.is_file():
+            return p
+    return None
+
+
+def decide(payload, now=None):
+    """Returns (output_dict_or_None). Side effect: writes snapshot."""
+    now = now or time.time()
+    cwd = payload.get("cwd") or ""
+    if not cwd:
+        return None
+    state = find_state(cwd)
+    if state is None:
+        return None
+    sid = str(payload.get("session_id") or "nosession")
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        mtime = state.stat().st_mtime
+        snap = STATE_DIR / f"{sid}.json"
+        snap.write_text(json.dumps({"state": str(state), "mtime": mtime, "at": now}))
+    except Exception:
+        return None
+    if os.environ.get("LONG_RUN_BLOCK_ONCE") == "1" and now - mtime > STALE_S:
+        flag = STATE_DIR / f"{sid}.blocked"
+        if not flag.exists():
+            try:
+                flag.write_text(str(now))
+            except Exception:
+                return None
+            return {"decision": "block", "reason": INSTRUCTION}
+    return None
+
+
+def main():
+    try:
+        payload = json.loads(sys.stdin.read() or "{}")
+        out = decide(payload)
+        if out:
+            print(json.dumps(out, ensure_ascii=False))
+    except Exception:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

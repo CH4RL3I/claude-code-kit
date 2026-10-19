@@ -1,0 +1,100 @@
+{
+  "name": "claude-code-kit",
+  "owner": {
+    "name": "Emilio Gappa",
+    "email": "emiliogappa@gmail.com"
+  },
+  "metadata": {
+    "description": "Small, tested Claude Code plugins: hand-off integrity, hidden acceptance tests, worktree cleanup, memory routing, MCP health, long-run state."
+  },
+  "plugins": [
+    {
+      "name": "owner-words",
+      "source": "./plugins/owner-words",
+      "description": "Prefixes Agent/SendMessage hand-offs with the user's latest words, verbatim, so subagents know who decided what.",
+      "version": "0.1.0",
+      "license": "MIT",
+      "author": {
+        "name": "Emilio Gappa",
+        "email": "emiliogappa@gmail.com"
+      }
+    },
+    {
+      "name": "holdouts",
+      "source": "./plugins/holdouts",
+      "description": "Hidden acceptance scenarios: a build route, a validator agent that uses the app like a user, and a guard that keeps scenarios from builders.",
+      "version": "0.1.0",
+      "license": "MIT",
+      "author": {
+        "name": "Emilio Gappa",
+        "email": "emiliogappa@gmail.com"
+      }
+    },
+    {
+      "name": "worktree-cleanup",
+      "source": "./plugins/worktree-cleanup",
+      "description": "Removes git worktrees whose work is clean, pushed, unlocked and not in use, after a git push and at session end.",
+      "version": "0.1.0",
+      "license": "MIT",
+      "author": {
+        "name": "Emilio Gappa",
+        "email": "emiliogappa@gmail.com"
+      }
+    },
+    {
+      "name": "prompt-router",
+      "source": "./plugins/prompt-router",
+      "description": "UserPromptSubmit hook that injects the best-matching lines of your MEMORY.md index, with optional local embeddings via Ollama.",
+      "version": "0.1.0",
+      "license": "MIT",
+      "author": {
+        "name": "Emilio Gappa",
+        "email": "emiliogappa@gmail.com"
+      }
+    },
+    {
+      "name": "mcp-health",
+      "source": "./plugins/mcp-health",
+      "description": "A `mcp-health` command that checks every MCP server Claude Code knows about, with an ignore list and optional proxy check.",
+      "version": "0.1.0",
+      "license": "MIT",
+      "author": {
+        "name": "Emilio Gappa",
+        "email": "emiliogappa@gmail.com"
+      }
+    },
+    {
+      "name": "long-run",
+      "source": "./plugins/long-run",
+      "description": "STATE.md discipline for long unattended runs, with PreCompact/SessionStart hooks that carry it across context compaction.",
+      "version": "0.1.0",
+      "license": "MIT",
+      "author": {
+        "name": "Emilio Gappa",
+        "email": "emiliogappa@gmail.com"
+      }
+    },
+    {
+      "name": "references-first",
+      "source": "./plugins/references-first",
+      "description": "Skill: collect real references and agree the design direction with the user before building anything visual.",
+      "version": "0.1.0",
+      "license": "MIT",
+      "author": {
+        "name": "Emilio Gappa",
+        "email": "emiliogappa@gmail.com"
+      }
+    },
+    {
+      "name": "skill-step-check",
+      "source": "./plugins/skill-step-check",
+      "description": "Skill: find out which step of an inconsistent skill varies by splitting it into steps and comparing runs.",
+      "version": "0.1.0",
+      "license": "MIT",
+      "author": {
+        "name": "Emilio Gappa",
+        "email": "emiliogappa@gmail.com"
+      }
+    }
+  ]
+}

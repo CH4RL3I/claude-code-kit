@@ -1,0 +1,356 @@
+#!/usr/bin/env python3
+"""UserPromptSubmit hook "prompt-router": plain-code prompt router.
+
+Looks at the user's prompt before the model does and injects the top memory index
+lines that match it. No cloud. Optional semantic ranking via a local Ollama embedding
+model (127.0.0.1 only, env PROMPT_ROUTER_EMBED=0 disables); keyword ranking is the
+fallback. Any error or no hint -> exit 0 with no output. Never reads memory file
+contents, only the index (lines that look like secrets are skipped).
+
+Memory index: the MEMORY.md of the current Claude project, auto-detected as
+  <claude config dir>/projects/<cwd with non-alphanumerics replaced by "-">/memory/MEMORY.md
+(also tried for each parent directory of cwd). Override with env PROMPT_ROUTER_MEMORY=/path/MEMORY.md.
+Index lines look like: - [Title](file.md) - one-line hook.
+
+Config (environment):
+  PROMPT_ROUTER_OFF        any value switches the hook off
+  PROMPT_ROUTER_MEMORY     explicit path to the index file
+  PROMPT_ROUTER_NAMES      comma-separated project/tool names; a match on one counts extra
+                           (also read from ~/.config/prompt-router/names.txt, one per line)
+  PROMPT_ROUTER_EMBED=0    keyword ranking only
+  PROMPT_ROUTER_OLLAMA     Ollama URL, default http://127.0.0.1:11434
+  PROMPT_ROUTER_MODEL      embedding model, default embeddinggemma
+  PROMPT_ROUTER_CACHE      embedding cache file
+"""
+import json, math, os, re, sys, time
+
+HOME = os.path.expanduser("~")
+CONFIG_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or HOME + "/.claude"
+NAMES_FILE = os.environ.get("PROMPT_ROUTER_NAMES_FILE", HOME + "/.config/prompt-router/names.txt")
+MIN_LEN = 25
+TOP_N = 3
+THRESHOLD = 3.0
+MAX_CHARS = 600
+HOOK_TEXT_MAX = 110
+
+OLLAMA = os.environ.get("PROMPT_ROUTER_OLLAMA", "http://127.0.0.1:11434")
+EMBED_MODEL = os.environ.get("PROMPT_ROUTER_MODEL", "embeddinggemma")
+CACHE_BASE = os.environ.get("PROMPT_ROUTER_CACHE", HOME + "/.cache/prompt-router/index.json")
+CACHE = CACHE_BASE  # set per memory file in set_memory()
+MEMORY_INDEX = None
+EMBED_TIMEOUT = 0.25      # per prompt; embeddinggemma warm = ~20 ms
+INLINE_MAX_NEW = 8        # more uncached lines than this -> rebuild in the background
+SEM_T = 0.27              # cosine at which a line counts as a match (unrelated prompts peak at ~0.21)
+KW_T_SCALE = 6.0          # keyword score THRESHOLD*2 -> 1.0, so kw THRESHOLD and SEM_T both map to 0.5
+
+STOP = set("""
+der die das den dem des ein eine einen einem einer eines und oder aber auch nicht noch nur
+ist sind war waren wird werden wurde hat haben hatte kann muss soll sollte mit von vor zu zum zur
+bei nach aus auf an in im am um für fuer über ueber unter durch wie was wer wo wann warum wieso
+ich du er sie es wir ihr mir mich dir dich uns mein dein sein ihre diese dieser dieses jetzt dann
+dass wenn als so da hier dort bitte mal schon noch alle alles mehr sehr nun ob doch ja nein
+the a an and or but not is are was were be been being have has had do does did can could should
+would will shall may might must of to in on at for with from by as it its this that these those
+i you he she we they me my your our their them what which who how why when where there here then
+than so if else also just now please all any some more most very into out up down over under
+""".split())
+
+KEY_RE = re.compile(
+    r"sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{10,}|xox[bp]-[A-Za-z0-9-]+|-----BEGIN"
+    r"|op://\S+|AKIA[0-9A-Z]{16}|(?i:api[_ -]?key\s*[:=]\s*\S{12,})"
+    r"|(?<![A-Za-z0-9+/=_-])(?=[A-Za-z0-9+=_-]*\d)(?=[A-Za-z0-9+=_-]*[A-Z])"
+    r"(?=[A-Za-z0-9+=_-]*[a-z])[A-Za-z0-9+=_-]{32,}(?![A-Za-z0-9+/=_-])")
+
+LINE_RE = re.compile(r"^- \[(?P<title>[^\]]+)\]\((?P<file>[^)]+)\)\s*[—–-]*\s*(?P<text>.*)$")
+
+def load_names():
+    names = [n.strip().lower() for n in os.environ.get("PROMPT_ROUTER_NAMES", "").split(",") if n.strip()]
+    try:
+        with open(NAMES_FILE, encoding="utf-8") as f:
+            names += [l.strip().lower() for l in f if l.strip() and not l.startswith("#")]
+    except OSError:
+        pass
+    return names
+
+
+NAMES = load_names()  # project/tool names: a match on one of these counts extra
+
+
+def detect_memory(cwd):
+    """Memory index of the Claude project that contains cwd, or None."""
+    explicit = os.environ.get("PROMPT_ROUTER_MEMORY")
+    if explicit:
+        return explicit
+    cur = os.path.abspath(cwd or HOME)
+    while True:
+        slug = re.sub(r"[^A-Za-z0-9]", "-", cur)
+        p = os.path.join(CONFIG_DIR, "projects", slug, "memory", "MEMORY.md")
+        if os.path.isfile(p):
+            return p
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return None
+        cur = parent
+
+
+def set_memory(path):
+    """Select the memory file; the embedding cache is kept per memory file."""
+    global MEMORY_INDEX, CACHE
+    import hashlib
+    MEMORY_INDEX = path
+    if "PROMPT_ROUTER_CACHE" in os.environ:
+        CACHE = CACHE_BASE
+        return
+    base, ext = os.path.splitext(CACHE_BASE)
+    CACHE = f"{base}-{hashlib.sha1(path.encode()).hexdigest()[:10]}{ext}"
+
+
+def tokens(text):
+    text = text.lower()
+    out = []
+    for m in re.finditer(r"[a-zäöüß0-9][a-zäöüß0-9\-]*[a-zäöüß0-9]|[a-zäöüß0-9]", text):
+        w = m.group(0)
+        out.append(w)
+        if "-" in w:
+            out.extend(p for p in w.split("-") if p)
+    return [w for w in out if w not in STOP and (len(w) > 2 or w in NAMES)]
+
+
+def canon(w):
+    return w
+
+
+def load_index(path):
+    entries = []
+    with open(path, encoding="utf-8") as f:
+        for raw in f:
+            m = LINE_RE.match(raw.strip())
+            if not m or KEY_RE.search(raw):
+                continue
+            entries.append((m.group("title"), m.group("file"), m.group("text")))
+    return entries
+
+
+def kw_scores(prompt, entries):
+    ptoks = {canon(t) for t in tokens(prompt)}
+    if not ptoks or not entries:
+        return [0.0] * len(entries)
+    docs = [{canon(t) for t in tokens(t + " " + x)} for t, _f, x in entries]
+    n = len(docs)
+    df = {}
+    for d in docs:
+        for t in d:
+            df[t] = df.get(t, 0) + 1
+
+    def idf(t):
+        return math.log(1 + n / df.get(t, 1))
+
+    names = {canon(x) for x in NAMES}
+    out = []
+    for d in docs:
+        s = 0.0
+        for t in ptoks:
+            if t in d:
+                s += idf(t) * (1.5 if t in names else 1.0)
+            elif len(t) >= 6:
+                # light stemming for German/English inflection: shared prefix
+                for u in d:
+                    if len(u) >= 6 and (u.startswith(t[:6]) and abs(len(u) - len(t)) <= 4):
+                        s += idf(u) * 0.5
+                        break
+        out.append(s)
+    return out
+
+
+def rank(prompt, entries, sem=None):
+    """sem: optional list of cosine similarities (same order as entries)."""
+    kw = kw_scores(prompt, entries)
+    scored = []
+    for i, k in enumerate(kw):
+        c = sem[i] if sem else None
+        if k < THRESHOLD and not (c is not None and c >= SEM_T):
+            continue
+        a = min(k / KW_T_SCALE, 1.5)
+        b = max(0.0, (c - 0.2) / (2 * (SEM_T - 0.2))) if c is not None else 0.0
+        scored.append((max(a, b) + 0.25 * min(a, b), i))
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    return [(s, entries[i]) for s, i in scored[:TOP_N]]
+
+
+# ---- local embeddings (Ollama) -------------------------------------------------
+
+def _q(text):
+    return ("task: search result | query: " + text if EMBED_MODEL.startswith("embeddinggemma")
+            else "search_query: " + text if EMBED_MODEL.startswith("nomic") else text)
+
+
+def _d(title, text):
+    return (f"title: {title} | text: {text}" if EMBED_MODEL.startswith("embeddinggemma")
+            else f"search_document: {title} - {text}" if EMBED_MODEL.startswith("nomic")
+            else f"{title} - {text}")
+
+
+def embed(texts, timeout):
+    import http.client
+    from urllib.parse import urlsplit  # light; urllib.request costs ~50 ms to import
+    u = urlsplit(OLLAMA)
+    body = json.dumps({"model": EMBED_MODEL, "input": texts, "keep_alive": "30m"}).encode()
+    c = http.client.HTTPConnection(u.hostname, u.port or 80, timeout=timeout)
+    try:
+        c.request("POST", "/api/embed", body, {"Content-Type": "application/json"})
+        r = c.getresponse()
+        if r.status != 200:
+            raise ValueError("http %d" % r.status)
+        v = json.loads(r.read())["embeddings"]
+    finally:
+        c.close()
+    if len(v) != len(texts):
+        raise ValueError("embedding count")
+    return v
+
+
+def doc_key(title, text):
+    import hashlib
+    return hashlib.sha1((EMBED_MODEL + "\0" + _d(title, text)).encode()).hexdigest()
+
+
+def cache_load():
+    try:
+        with open(CACHE, encoding="utf-8") as f:
+            c = json.load(f)
+        if c.get("model") == EMBED_MODEL and isinstance(c.get("lines"), dict):
+            return c["lines"]
+    except Exception:
+        pass
+    return {}
+
+
+def cache_save(lines):
+    os.makedirs(os.path.dirname(CACHE), exist_ok=True)
+    tmp = CACHE + f".{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"model": EMBED_MODEL, "lines": lines}, f, separators=(",", ":"))
+    os.replace(tmp, CACHE)
+
+
+def reindex(entries, timeout=60):
+    """Embed uncached lines, drop stale ones, write the cache. Returns the cache dict."""
+    have = cache_load()
+    keys = [doc_key(t, x) for t, _f, x in entries]
+    embed([_q("warm-up")], timeout)  # makes sure the model is loaded even if nothing changed
+    todo = [(k, e) for k, e in zip(keys, entries) if k not in have]
+    new = {k: have[k] for k in keys if k in have}
+    for i in range(0, len(todo), 32):
+        chunk = todo[i:i + 32]
+        vecs = embed([_d(e[0], e[2]) for _k, e in chunk], timeout)
+        for (k, _e), v in zip(chunk, vecs):
+            new[k] = [round(x, 5) for x in v]
+    if new != have:
+        cache_save(new)
+    return new
+
+
+def spawn_reindex():
+    """Detached background rebuild (also warms the model); one at a time via a lock file."""
+    import subprocess
+    lock = CACHE + ".lock"
+    try:
+        os.makedirs(os.path.dirname(CACHE), exist_ok=True)
+        if os.path.exists(lock) and time.time() - os.path.getmtime(lock) < 120:
+            return
+        open(lock, "w").close()
+        subprocess.Popen([sys.executable, os.path.abspath(__file__), "--reindex", MEMORY_INDEX],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except Exception:
+        pass
+
+
+def semantic_scores(prompt, entries):
+    """Cosine per entry, or None -> caller uses keyword ranking only."""
+    if os.environ.get("PROMPT_ROUTER_EMBED") == "0" or not entries:
+        return None
+    try:
+        have = cache_load()
+        keys = [doc_key(t, x) for t, _f, x in entries]
+        missing = [k for k in keys if k not in have]
+        if len(missing) > INLINE_MAX_NEW:
+            spawn_reindex()
+            return None
+        if missing:
+            have = reindex(entries, EMBED_TIMEOUT)
+        q = embed([_q(prompt)], EMBED_TIMEOUT)[0]
+    except Exception:
+        spawn_reindex()   # server cold/slow: warm it for the next prompt (no-op if it is down)
+        return None
+    qn = math.sqrt(sum(a * a for a in q)) or 1.0
+    out = []
+    for k in keys:
+        v = have.get(k)
+        if not v or len(v) != len(q):
+            return None
+        out.append(sum(a * b for a, b in zip(q, v)) / (qn * (math.sqrt(sum(b * b for b in v)) or 1.0)))
+    return out
+
+
+def build(prompt):
+    lines = []
+    try:
+        entries = load_index(MEMORY_INDEX)
+        for s, (title, fn, text) in rank(prompt, entries, semantic_scores(prompt, entries)):
+            text = text.strip()
+            if len(text) > HOOK_TEXT_MAX:
+                text = text[:HOOK_TEXT_MAX].rsplit(" ", 1)[0] + "..."
+            lines.append(f"- {fn}: {text}")
+    except Exception:
+        pass
+    if not lines:
+        return None
+    head = "prompt-router:"
+    body = "memory may apply (read the file if relevant):\n" + "\n".join(lines)
+    room = MAX_CHARS - len(head) - 1
+    while len(body) > room and len(lines) > 1:
+        lines.pop()
+        body = "memory may apply (read the file if relevant):\n" + "\n".join(lines)
+    return head + "\n" + body[:room]
+
+
+def main_reindex(path):
+    set_memory(path)
+    reindex(load_index(MEMORY_INDEX))
+    try:  # on failure the lock stays, which backs off retries for 2 minutes
+        os.remove(CACHE + ".lock")
+    except OSError:
+        pass
+
+
+def main():
+    if len(sys.argv) > 2 and sys.argv[1] == "--reindex":
+        return main_reindex(sys.argv[2])
+    if os.environ.get("PROMPT_ROUTER_OFF"):
+        return
+    d = json.load(sys.stdin)
+    if not isinstance(d, dict) or d.get("agent_id"):
+        return
+    prompt = d.get("prompt")
+    if not isinstance(prompt, str):
+        return
+    p = prompt.strip()
+    if len(p) < MIN_LEN or p[0] in "/!":
+        return
+    mem = detect_memory(d.get("cwd") or "")
+    if not mem or not os.path.isfile(mem):
+        return
+    set_memory(mem)
+    ctx = build(p)
+    if ctx:
+        sys.stdout.write(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit", "additionalContext": ctx}}, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except BaseException:
+        pass
+    sys.exit(0)

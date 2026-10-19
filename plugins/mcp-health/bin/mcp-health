@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Health check for all MCP servers Claude Code knows about.
+
+  mcp-health            table of every server: ok / needs login / broken
+  mcp-health --notify   only a desktop notification when something needs attention (for cron/launchd)
+
+Uses `claude mcp list` (Claude's own connection test).
+Optional: a direct check of a local shared MCP proxy, if you run one
+  (env MCP_HEALTH_PROXY_PORT=8765; env MCP_HEALTH_PROXY_LOG=<file> to also count restarts
+   by the log line MCP_HEALTH_PROXY_RESTART_MARKER within the last hour).
+Servers listed in the ignore file (one name per line, "#" comments) are reported but never
+alarm, e.g. integrations that are deliberately unused:
+  env MCP_HEALTH_IGNORE, default ~/.config/mcp-health/ignore.txt
+State/log dir: env MCP_HEALTH_HOME, default ~/.cache/mcp-health.
+"""
+import os, re, shutil, socket, subprocess, sys, time
+from pathlib import Path
+
+HOME = Path.home()
+IGNORE_FILE = Path(os.environ.get("MCP_HEALTH_IGNORE") or HOME / ".config" / "mcp-health" / "ignore.txt")
+STATE = Path(os.environ.get("MCP_HEALTH_HOME") or HOME / ".cache" / "mcp-health")
+PROXY_PORT = os.environ.get("MCP_HEALTH_PROXY_PORT", "").strip()
+PROXY_LOG = os.environ.get("MCP_HEALTH_PROXY_LOG", "").strip()
+RESTART_MARKER = os.environ.get("MCP_HEALTH_PROXY_RESTART_MARKER", "Loading named server configurations")
+LINE = re.compile(r"^(?P<name>.+?): (?P<target>.+) - (?P<mark>[✔✘!]) (?P<status>.*)$")
+STATES = {"✔": "ok", "!": "needs login", "✘": "broken"}
+
+
+def proxy_up() -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", int(PROXY_PORT)), timeout=3):
+            return True
+    except (OSError, ValueError):
+        return False
+
+
+def proxy_restarts_last_hour() -> int:
+    if not PROXY_LOG or not os.path.isfile(PROXY_LOG):
+        return 0
+    stamp = time.strftime("%Y-%m-%d %H", time.localtime(time.time() - 3600))
+    now = time.strftime("%Y-%m-%d %H")
+    n = 0
+    with open(PROXY_LOG, errors="replace") as f:
+        for line in f:
+            if RESTART_MARKER in line and (stamp in line or now in line):
+                n += 1
+    return n
+
+
+def parse(text):
+    rows = []
+    for line in text.splitlines():
+        m = LINE.match(line.strip())
+        if m:
+            rows.append((m["name"], STATES[m["mark"]], m["status"].split(" — ")[-1][:80]))
+    return rows
+
+
+def notify(title, message):
+    if shutil.which("terminal-notifier"):
+        subprocess.run(["terminal-notifier", "-title", title, "-message", message], capture_output=True)
+    elif shutil.which("osascript"):
+        esc = lambda s: s.replace("\\", "\\\\").replace('"', '\\"')
+        subprocess.run(["osascript", "-e", f'display notification "{esc(message)}" with title "{esc(title)}"'],
+                       capture_output=True)
+    elif shutil.which("notify-send"):
+        subprocess.run(["notify-send", title, message], capture_output=True)
+
+
+def main() -> int:
+    do_notify = "--notify" in sys.argv
+    ignore = set()
+    if IGNORE_FILE.is_file():
+        ignore = {l.strip() for l in IGNORE_FILE.read_text().splitlines() if l.strip() and not l.startswith("#")}
+    r = subprocess.run(["claude", "mcp", "list"], capture_output=True, text=True, timeout=300,
+                       cwd=str(HOME), stdin=subprocess.DEVNULL)
+    rows = parse(r.stdout)
+    if not rows:
+        print("claude mcp list returned nothing parseable:\n" + (r.stderr or r.stdout)[:500])
+        return 2
+    bad = [x for x in rows if x[1] != "ok" and x[0] not in ignore]
+    check_proxy = bool(PROXY_PORT)
+    up, restarts = True, 0
+    if check_proxy:
+        up = proxy_up()
+        restarts = proxy_restarts_last_hour()
+        if not up or restarts > 3:
+            bad.append((f"shared proxy :{PROXY_PORT}", "broken",
+                        "down" if not up else f"{restarts} restarts in the last hour"))
+
+    if do_notify:
+        STATE.mkdir(parents=True, exist_ok=True)
+        with (STATE / "health.log").open("a") as f:
+            f.write(f"== {time.strftime('%Y-%m-%d %H:%M')} ok={sum(x[1] == 'ok' for x in rows)} "
+                    f"attention={len(bad)}: {', '.join(f'{n} ({s})' for n, s, _ in bad)}\n")
+        if bad:
+            names = ", ".join(n for n, _, _ in bad[:4]) + (" …" if len(bad) > 4 else "")
+            notify("MCP health", f"{len(bad)} need attention: {names}")
+        return 0
+
+    width = max(len(n) for n, _, _ in rows) + 2
+    icon = {"ok": "✔", "needs login": "!", "broken": "✘"}
+    for n, s, detail in sorted(rows, key=lambda x: (x[1] == "ok", x[0].lower())):
+        note = "  (ignored)" if n in ignore and s != "ok" else ""
+        print(f"{icon[s]} {n:<{width}} {s:<12} {'' if s == 'ok' else detail}{note}")
+    if check_proxy:
+        label = f"shared proxy :{PROXY_PORT}"
+        print(f"{'✔' if up and restarts <= 3 else '✘'} {label:<{width}} "
+              f"{'ok' if up else 'down':<12} {restarts} restarts in the last hour")
+    if bad:
+        print("\nFix: '! needs login' -> in a Claude session run /mcp, pick the server, Authenticate."
+              "\n     broken -> run the server's command by hand to see its error; check the proxy log if you use one.")
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
