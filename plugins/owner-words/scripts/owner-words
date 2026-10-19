@@ -25,9 +25,16 @@ SECRET = re.compile(
 
 
 def human_text(entry):
-    if entry.get("type") != "user" or entry.get("isMeta") or entry.get("isCompactSummary"):
+    att = entry.get("attachment")
+    if isinstance(att, dict) and "<cross-session-message" in str(att.get("prompt", "")):
+        return PEER  # a peer message queued while this session was busy
+    if entry.get("type") != "user" or entry.get("isCompactSummary"):
         return None
     c = (entry.get("message") or {}).get("content")
+    if isinstance(c, str) and "<cross-session-message" in c:
+        return PEER  # peer messages are stored as meta entries, so check before isMeta
+    if entry.get("isMeta"):
+        return None
     if isinstance(c, list):
         c = "\n".join(b.get("text", "") for b in c
                       if isinstance(b, dict) and b.get("type") == "text")
@@ -59,7 +66,7 @@ def latest_owner_text(path, stop_at_peer=False):
             else:
                 carry = b""
             for raw in reversed(lines):
-                if not raw.strip() or b'"user"' not in raw:
+                if not raw.strip() or (b'"user"' not in raw and b'cross-session-message' not in raw):
                     continue
                 try:
                     t = human_text(json.loads(raw))
