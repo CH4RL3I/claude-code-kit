@@ -6,7 +6,10 @@ A worktree is removed only when all of these hold:
   - `git status --porcelain` is empty (no changes, no untracked files),
   - its commits are on the remote: the branch has an upstream and nothing is
     ahead of it, or (detached / no upstream) HEAD is contained in a remote branch,
-  - no process has its working directory inside it (a running session keeps it).
+  - no process has its working directory inside it (a running session keeps it),
+  - nothing happened in it for IDLE_HOURS (git index, HEAD log, files): sessions often work
+    via `cd <worktree> && ...`, so no process sits in it, and the push that triggers the
+    sweep usually comes from the very worktree that is still in use.
 The branch itself is kept; only the folder goes (`git worktree remove`, no --force).
 
   worktree-cleanup           dry run, prints what it would do
@@ -24,6 +27,7 @@ from pathlib import Path
 
 HOME = Path.home()
 STATE = Path(os.environ.get("WORKTREE_CLEANUP_HOME") or HOME / ".cache" / "worktree-cleanup")
+IDLE_HOURS = float(os.environ.get("WORKTREE_CLEANUP_IDLE_HOURS", "24"))
 ROOTS_FILE = HOME / ".config" / "worktree-cleanup" / "roots.txt"
 
 
@@ -79,6 +83,20 @@ def cwds_in_use():
     return [l[1:] for l in r.stdout.splitlines() if l.startswith("n/")]
 
 
+def last_activity(path):
+    """Newest mtime of the worktree's git index/HEAD log and its top-level entries."""
+    stamps = []
+    code, gitdir = git(path, "rev-parse", "--git-dir")
+    if code == 0:
+        g = Path(gitdir if os.path.isabs(gitdir) else os.path.join(path, gitdir))
+        stamps += [f.stat().st_mtime for f in (g / "index", g / "logs" / "HEAD", g / "HEAD") if f.exists()]
+    try:
+        stamps += [e.stat(follow_symlinks=False).st_mtime for e in os.scandir(path) if e.name != ".git"]
+    except OSError:
+        pass
+    return max(stamps, default=0)
+
+
 def verdict(wt, busy):
     path = wt["worktree"]
     if not Path(path).is_dir():
@@ -88,6 +106,9 @@ def verdict(wt, busy):
     real = os.path.realpath(path)
     if any(c in (path, real) or c.startswith((path + "/", real + "/")) for c in busy):
         return False, "a process is working in it"
+    idle = (time.time() - last_activity(path)) / 3600
+    if idle < IDLE_HOURS:
+        return False, f"used {idle:.1f} h ago (removed after {IDLE_HOURS:g} h idle)"
     code, status = git(path, "status", "--porcelain")
     if code or status:
         return False, "has uncommitted or untracked changes"

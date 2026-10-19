@@ -45,8 +45,8 @@ class T(unittest.TestCase):
     def tearDown(self):
         self.t.cleanup()
 
-    def run_cli(self, *args, roots=True, stdin=""):
-        env = dict(os.environ, HOME=self.home)
+    def run_cli(self, *args, roots=True, stdin="", idle_hours="0"):
+        env = dict(os.environ, HOME=self.home, WORKTREE_CLEANUP_IDLE_HOURS=idle_hours)
         env.pop("WORKTREE_CLEANUP_ROOTS", None)
         if roots:
             env["WORKTREE_CLEANUP_ROOTS"] = self.root
@@ -72,6 +72,11 @@ class T(unittest.TestCase):
         self.assertTrue(os.path.isdir(self.wt["unpushed"]))
         self.assertTrue(os.path.isdir(self.wt["dirty"]))
         self.assertIn("pushed", sh("git", "branch", cwd=self.repo))  # branch kept
+
+    def test_recently_used_is_kept(self):
+        self.assertIn("h ago", self.run_cli(idle_hours="24").stdout)
+        self.run_cli("--really", idle_hours="24")
+        self.assertTrue(os.path.isdir(self.wt["pushed"]))
 
     def test_locked_is_kept(self):
         sh("git", "worktree", "lock", self.wt["pushed"], cwd=self.repo)
