@@ -1,14 +1,35 @@
 #!/usr/bin/env python3
 """PreToolUse guard: hide the holdouts directory (default ~/.holdouts) from every subagent
 except holdout-validator. The main session is not restricted.
-A speed bump for honest agents (matches the literal directory name and the `holdout` CLI),
-not a sandbox. Never crashes; any error -> exit 0 without output.
+Only real access counts: a path field (Read/Edit/Write/Glob/Grep/NotebookEdit) pointing into
+the holdouts directory, or a Bash command that touches it or runs `holdout ls|path|show|cat`.
+Text that merely mentions the directory (docs, tests, content being written) is allowed.
+A speed bump for honest agents, not a sandbox. Never crashes; any error -> exit 0 without output.
 
 Config: env HOLDOUTS_DIR is also matched when set.
 """
 import json, os, re, sys
 
-CLI = re.compile(r"(^|[\s;&|(`/])holdout\s+(ls|path|add)\b")
+CLI = re.compile(r"(^|[\s;&|(`])(?:\S*/)?holdout\s+(ls|path|show|cat)\b")
+PATH_FIELDS = ("file_path", "path", "notebook_path", "pattern", "glob")
+
+
+def dir_pattern():
+    names = [r"\.holdouts"]
+    if os.environ.get("HOLDOUTS_DIR"):
+        names.append(re.escape(os.path.realpath(os.path.expanduser(os.environ["HOLDOUTS_DIR"]))))
+    return re.compile(r"(?:(?:^|[/~])" + names[0] + "|" + "|".join(names[1:] or ["(?!x)x"]) + r")(?:/|$|[\s'\";|&)])")
+
+
+def touches(tool, ti, rx):
+    if tool == "Bash":
+        cmd = str(ti.get("command", ""))
+        return bool(rx.search(cmd) or CLI.search(cmd))
+    for key in PATH_FIELDS:
+        v = ti.get(key)
+        if isinstance(v, str) and (rx.search(v) or rx.search(os.path.realpath(os.path.expanduser(v)))):
+            return True
+    return False
 VALIDATOR = "holdout-validator"
 
 
@@ -20,13 +41,8 @@ def main():
         atype = str(d.get("agent_type") or "")
         if atype == VALIDATOR or atype.endswith(":" + VALIDATOR):  # plugin agents are namespaced
             return
-        needles = [".holdouts"]
-        if os.environ.get("HOLDOUTS_DIR"):
-            needles.append(os.environ["HOLDOUTS_DIR"])
-        blob = json.dumps(d.get("tool_input", {}), ensure_ascii=False)
         ti = d.get("tool_input")
-        cmd = str(ti.get("command", "")) if isinstance(ti, dict) else ""
-        hit = any(n in blob for n in needles) or (d.get("tool_name") == "Bash" and CLI.search(cmd))
+        hit = isinstance(ti, dict) and touches(d.get("tool_name"), ti, dir_pattern())
         if not hit:
             return
         print(json.dumps({"hookSpecificOutput": {
